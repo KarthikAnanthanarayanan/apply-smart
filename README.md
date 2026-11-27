@@ -1,1 +1,15 @@
-<img width="473" height="825" alt="Screenshot 2026-11-27 at 12 35 55 PM" src="https://github.com/user-attachments/assets/484f067e-373d-46fc-ba9d-69131fd35709" />
+<div align="center">
+
+  <h2>System Architecture</h2>
+
+  <img
+    width="473"
+    alt="Apply Smart system architecture: resume upload, nightly cron and scoring pipeline"
+    src="https://github.com/user-attachments/assets/484f067e-373d-46fc-ba9d-69131fd35709"
+  />
+
+  <p><sub>
+    🟦 Resume upload &nbsp;·&nbsp; 🟪 Nightly cron &nbsp;·&nbsp; ⬜ Shared pipeline &nbsp;·&nbsp; 🟨 User-facing
+  </sub></p>
+
+</div>
