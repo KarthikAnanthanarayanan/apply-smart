@@ -1,7 +1,4 @@
 <div align="center">
-
-  <h2>System Architecture</h2>
-
   <img
     width="473"
     alt="Apply Smart system architecture: resume upload, nightly cron and scoring pipeline"
