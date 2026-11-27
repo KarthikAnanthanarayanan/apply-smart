@@ -70,8 +70,8 @@ async function ccGet(url: string): Promise<CcResult> {
       const res = await fetch(url, {
         signal: AbortSignal.timeout(CC_TIMEOUT_MS),
       });
-      if (res.status === 503 && attempt === 1) {
-        console.warn(`Common Crawl 503, retrying: ${url}`);
+      if (res.status >= 500 && attempt === 1) {
+        console.warn(`Common Crawl ${res.status}, retrying: ${url}`);
         await res.body?.cancel();
         await sleep(CC_RETRY_DELAY_MS);
         continue;
