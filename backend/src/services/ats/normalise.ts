@@ -32,7 +32,7 @@ export function parseLocation(location: string | null): ParsedLocation {
 
 // "San Francisco, CA" -> { city: "San Francisco", country: "United States" }.
 function parsePlace(location: string): ParsedLocation {
-  // Parentheses separate parts too: "Remote (US)", "New York, NY (HQ)".
+  // "Remote, US" --> "{ "US" }."
   const parts = location
     .split(/[,()]/)
     .map(stripWorkMode)
