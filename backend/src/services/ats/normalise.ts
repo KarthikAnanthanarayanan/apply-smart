@@ -17,13 +17,12 @@ const COUNTRY_NAMES = new Intl.DisplayNames(["en"], { type: "region" });
 
 export const REMOTE_CITY = "Remote";
 
-// Built on first use from GeoNames (every city with 1,000+ people). Each list is most populous first.
+// Melbourne --> Melbourne
 let exactNames: Map<string, CityEntry[]> | null = null;
-// Same cities keyed without a trailing " City", so "New York" finds "New York City".
+// New York City --> New York
 let namesWithoutCity: Map<string, CityEntry[]> | null = null;
 
-// e.g. "Sydney, NSW" -> { city: "Sydney", country: "Australia" },
-// "Remote (US)" -> { city: "Remote", country: "United States" }.
+// Wrapper function of parsePlace with
 export function parseLocation(location: string | null): ParsedLocation {
   const place = parsePlace(location ?? "");
   return /\bremote\b/i.test(location ?? "")
@@ -54,11 +53,15 @@ function parsePlace(location: string): ParsedLocation {
   for (const part of placeParts) {
     if (isTwoLetters(part)) continue;
     const city = pickCity(citiesNamed(part), countryCode, shortCodes);
-    if (city) return { city: city.name, country: nameOfCountry(city.countryCode) };
+    if (city)
+      return { city: city.name, country: nameOfCountry(city.countryCode) };
   }
 
   countryCode ??= shortCodes.map(countryCodeOf).find((code) => code) ?? null;
-  return { city: null, country: countryCode ? nameOfCountry(countryCode) : null };
+  return {
+    city: null,
+    country: countryCode ? nameOfCountry(countryCode) : null,
+  };
 }
 
 // For a field that is known to hold a country, so two-letter values are ISO codes
@@ -88,7 +91,9 @@ function pickCity(
   if (countryCode) {
     return candidates.find((city) => city.countryCode === countryCode) ?? null;
   }
-  const byState = candidates.find((city) => shortCodes.includes(city.adminCode));
+  const byState = candidates.find((city) =>
+    shortCodes.includes(city.adminCode),
+  );
   if (byState) return byState;
 
   for (const code of shortCodes) {
@@ -166,10 +171,7 @@ function buildCityIndexes(): [
 
 // Lowercase without accents, so "Zurich" finds "Zürich".
 function cityKey(name: string): string {
-  return name
-    .normalize("NFD")
-    .replace(/\p{M}/gu, "")
-    .toLowerCase();
+  return name.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
 }
 
 // "Remote - USA" -> "USA", "Sydney - Hybrid" -> "Sydney", "Remote" -> "".
