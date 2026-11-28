@@ -73,17 +73,21 @@ for (const cities of australianCities.values()) {
 export function parseLocation(text: string | null): AustralianLocation | null {
   if (!text) return null;
 
-  // "Sydney (Hybrid), NSW" -> ["Sydney", "NSW"]
+  // "Sydney (Hybrid), NSW" -> ["Sydney", "NSW"], "Sydney NSW" -> ["Sydney", "NSW"]
   const parts = text
     .split(/[,()]/)
     .map((part) =>
       part
         .trim()
-        .replace(/^(remote|hybrid)\b[\s\-–:/]*/i, "")
-        .replace(/[\s\-–:/]*\b(remote|hybrid)$/i, "")
+        .replace(/^(remote|hybrid|on-?site|in-?office)\b[\s\-–:/]*/i, "")
+        .replace(/[\s\-–:/]*\b(remote|hybrid|on-?site|in-?office)$/i, "")
         .trim(),
     )
-    .filter((part) => part !== "");
+    .filter((part) => part !== "")
+    .flatMap((part) => {
+      const [, rest, lastWord] = part.match(/^(.+)\s+(\S+)$/) ?? [];
+      return rest && statesByName.has(toKey(lastWord!)) ? [rest, lastWord!] : [part];
+    });
 
   // 1. Go through the parts. Anything that points outside Australia drops the job.
   let state: State | undefined;
@@ -153,6 +157,7 @@ function toKey(value: string): string {
     .normalize("NFD")
     .replace(/\p{M}/gu, "")
     .replace(/\./g, "")
+    .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
 }
