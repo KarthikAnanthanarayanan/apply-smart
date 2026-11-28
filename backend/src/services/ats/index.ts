@@ -3,7 +3,7 @@ import { fetchJobs as fetchGreenhouseJobs } from './greenhouse.js';
 import { fetchJobs as fetchLeverJobs } from './lever.js';
 import type { FetchJobsResult, JobBoard } from './http.js';
 
-export type { AtsJob, FetchJobsResult, JobBoard } from './http.js';
+export type { AtsJob, JobBoard } from './http.js';
 
 export function fetchJobs(jobBoard: JobBoard, companyBoardId: string): Promise<FetchJobsResult> {
   switch (jobBoard) {

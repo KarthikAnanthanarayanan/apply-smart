@@ -5,8 +5,7 @@
   "scripts": {
     "seed:companies": "tsx scripts/seed-companies.ts",
     "worker": "tsx src/worker/index.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test src/**/*.test.ts"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.119.2",
