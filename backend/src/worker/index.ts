@@ -60,7 +60,8 @@ await boss.work(DISPATCH_JOB_SYNCS, async () => {
 for (const queue of Object.values(SYNC_JOBS_QUEUES)) {
   await boss.work<Company>(queue, async ([job]) => {
     try {
-      await ingestCompany(job!.data);
+      const errors = await ingestCompany(job!.data);
+      if (errors.length > 0) throw new Error(errors.join("\n"));
     } catch (err) {
       console.error(err); // pg-boss only stores the error on the job, so log it too.
       throw err;

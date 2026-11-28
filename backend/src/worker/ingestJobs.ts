@@ -47,15 +47,14 @@ async function waitForBoardSlot(board: JobBoard): Promise<void> {
   lastRequestAt.set(board, Date.now());
 }
 
-export async function ingestCompany(company: Company): Promise<void> {
+// Returns every error hit, so one failure never stops the later saves/deletes. index.ts throws them.
+export async function ingestCompany(company: Company): Promise<string[]> {
   const label = `${company.job_board}/${company.company_board_id}`;
+  const errors: string[] = [];
 
   await waitForBoardSlot(company.job_board);
   const fetched = await fetchJobs(company.job_board, company.company_board_id);
-  if (!fetched.ok) {
-    console.warn(`${label}: fetch failed: ${fetched.reason}`);
-    return;
-  }
+  if (!fetched.ok) return [`${label}: fetch failed: ${fetched.reason}`];
 
   // Only Australian jobs updated in the last MAX_JOB_AGE_DAYS are kept, since location is null when its not Australian.
   // Anything else is left out of liveIds, so deleteClosedJobs also removes it from the table.
@@ -76,11 +75,18 @@ export async function ingestCompany(company: Company): Promise<void> {
   }
 
   for (let start = 0; start < rows.length; start += SAVE_BATCH_SIZE) {
-    await saveBatch(rows.slice(start, start + SAVE_BATCH_SIZE));
+    const saveError = await saveBatch(
+      rows.slice(start, start + SAVE_BATCH_SIZE),
+    );
+    if (saveError) errors.push(`${label}: saving jobs failed: ${saveError}`);
   }
 
   const liveIds = new Set(keptJobs.map((job) => job.boardJobId));
-  await deleteClosedJobs(company, liveIds);
+  const deleteError = await deleteClosedJobs(company, liveIds);
+  if (deleteError)
+    errors.push(`${label}: deleting closed jobs failed: ${deleteError}`);
+
+  return errors;
 }
 
 function toJobRow(companyId: string, job: AtsJob): JobRow {
@@ -109,20 +115,18 @@ function duplicateKey(
     .digest("hex");
 }
 
-async function saveBatch(batch: JobRow[]): Promise<void> {
+async function saveBatch(batch: JobRow[]): Promise<string | null> {
   const batchError = await upsertJobs(batch);
-  if (!batchError) return;
+  if (!batchError) return null;
 
-  console.warn(
-    `Saving a batch of ${batch.length} jobs failed (${batchError}), retrying one row at a time`,
-  );
+  // retry one row at a time so a bad row doesn't stop the rest of the batch saving.
+  const rowErrors: string[] = [];
   for (const row of batch) {
     const rowError = await upsertJobs([row]);
-    if (!rowError) continue;
-    console.error(
-      `Job ${row.board_job_id} for company ${row.company_id} ("${row.title}") failed: ${rowError}`,
-    );
+    if (rowError)
+      rowErrors.push(`job ${row.board_job_id} ("${row.title}"): ${rowError}`);
   }
+  return rowErrors.length > 0 ? rowErrors.join("; ") : null;
 }
 
 // Returns the error message, or null on success. Never throws.
@@ -141,7 +145,7 @@ async function upsertJobs(rows: JobRow[]): Promise<string | null> {
 async function deleteClosedJobs(
   company: Company,
   liveIds: Set<string>,
-): Promise<void> {
+): Promise<string | null> {
   try {
     if (liveIds.size === 0) {
       const { error } = await supabase
@@ -149,7 +153,7 @@ async function deleteClosedJobs(
         .delete()
         .eq("company_id", company.id);
       if (error) throw new Error(error.message);
-      return;
+      return null;
     }
 
     const storedIds = await loadBoardJobIds(company.id);
@@ -162,11 +166,9 @@ async function deleteClosedJobs(
         .in("board_job_id", closedIds.slice(start, start + DELETE_BATCH_SIZE));
       if (error) throw new Error(error.message);
     }
+    return null;
   } catch (err) {
-    // throws so boss marks job as failed and retries again.
-    console.error(
-      `${company.job_board}/${company.company_board_id}: deleting closed jobs failed: ${errorMessage(err)}`,
-    );
+    return errorMessage(err);
   }
 }
 
