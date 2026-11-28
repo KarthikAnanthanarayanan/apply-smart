@@ -44,7 +44,7 @@ export interface CompanyIngestResult {
   cleanupFailed: boolean;
 }
 
-// Assumes one worker process with at most one active job per board (groupConcurrency: 1),
+// Each board's queue runs one company at a time in one worker process,
 // so requests to each board start at least REQUEST_INTERVAL_MS apart.
 const lastRequestAt = new Map<JobBoard, number>();
 

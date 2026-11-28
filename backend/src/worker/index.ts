@@ -1,51 +1,58 @@
 import { ingestCompany, loadCompanies, type Company } from "./ingestJobs.js";
 import {
-  INGEST_COMPANY,
-  INGEST_JOBS,
-  INGEST_SINGLETON_KEY,
+  SYNC_JOBS_QUEUES,
+  DISPATCH_JOB_SYNCS,
+  DISPATCH_SINGLETON_KEY,
   startBoss,
 } from "./queues.js";
+import type { JobBoard } from "../services/ats/index.js";
 
 const NIGHTLY_2AM = "0 2 * * *"; // CRON time for 2am every night.
-const BOARD_COUNT = 3; // 3 job boards (ashby, lever, greenhouse).
 const INSERT_BATCH_SIZE = 500; // insert 500 companies at a time (small & safe).
 
 const boss = await startBoss();
 
-await boss.work(INGEST_JOBS, async () => {
+// Dispatcher: reads every company and queues a sync job for each in its board's sync queue.
+await boss.work(DISPATCH_JOB_SYNCS, async () => {
   const companies = await loadCompanies();
-  let queued = 0;
-  for (let start = 0; start < companies.length; start += INSERT_BATCH_SIZE) {
-    const ids = await boss.insert(
-      INGEST_COMPANY,
-      companies.slice(start, start + INSERT_BATCH_SIZE).map((company) => ({
-        data: company,
-        singletonKey: `company:${company.id}`,
-        group: { id: company.job_board },
-      })),
-    );
-    queued += ids?.length ?? 0;
+
+  const byBoard = new Map<JobBoard, Company[]>();
+  for (const company of companies) {
+    const boardCompanies = byBoard.get(company.job_board) ?? [];
+    boardCompanies.push(company);
+    byBoard.set(company.job_board, boardCompanies);
   }
-  console.log(`Queued ${queued}/${companies.length} company ingests`);
+
+  for (const [board, boardCompanies] of byBoard) {
+    let queued = 0;
+    for (let start = 0; start < boardCompanies.length; start += INSERT_BATCH_SIZE) {
+      const ids = await boss.insert(
+        SYNC_JOBS_QUEUES[board],
+        boardCompanies.slice(start, start + INSERT_BATCH_SIZE).map((company) => ({
+          data: company,
+          singletonKey: `company:${company.id}`,
+        })),
+      );
+      queued += ids?.length ?? 0;
+    }
+    console.log(`Queued ${queued}/${boardCompanies.length} companies in ${SYNC_JOBS_QUEUES[board]}`);
+  }
 });
 
-// groupConcurrency 1 per job board keeps each board to one request at a time across all workers,
-// while the three boards run in parallel.
-await boss.work<Company>(
-  INGEST_COMPANY,
-  { localConcurrency: BOARD_COUNT, groupConcurrency: 1 },
-  async ([job]) => ingestCompany(job!.data),
-);
+// One worker per board sync queue: each board handles one company at a time, and the boards run in parallel.
+for (const queue of Object.values(SYNC_JOBS_QUEUES)) {
+  await boss.work<Company>(queue, async ([job]) => ingestCompany(job!.data));
+}
 
 await boss.schedule(
-  INGEST_JOBS,
+  DISPATCH_JOB_SYNCS,
   NIGHTLY_2AM,
   {},
-  { tz: "Australia/Sydney", singletonKey: INGEST_SINGLETON_KEY },
+  { tz: "Australia/Sydney", singletonKey: DISPATCH_SINGLETON_KEY },
 );
 
 console.log(
-  `Worker started, "${INGEST_JOBS}" scheduled at 2am Australia/Sydney`,
+  `Worker started, "${DISPATCH_JOB_SYNCS}" scheduled at 2am Australia/Sydney`,
 );
 
 let stopping = false;
