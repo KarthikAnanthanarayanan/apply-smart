@@ -11,9 +11,8 @@ const PAGE_SIZE = 1_000;
 const REQUEST_INTERVAL_MS = 1_000;
 const SAVE_BATCH_SIZE = 50;
 const DELETE_BATCH_SIZE = 100;
-const PROGRESS_EVERY = 100;
 
-interface Company {
+export interface Company {
   id: string;
   name: string;
   job_board: JobBoard;
@@ -34,107 +33,61 @@ interface JobRow {
   last_updated: string;
 }
 
-interface IngestSummary {
-  companiesFetched: number;
-  companiesFailed: Record<string, number>;
+export interface CompanyIngestResult {
+  fetchFailed: string | null;
   jobsSeen: number;
   jobsOutsideAustralia: number;
   duplicatesDropped: number;
   jobsSaved: number;
   rowsFailed: number;
   jobsDeleted: number;
-  companiesCleanupFailed: number;
+  cleanupFailed: boolean;
 }
 
-export async function ingestJobs(): Promise<IngestSummary> {
-  const limit = readIngestLimit();
-  const companies = await loadCompanies(limit);
-  console.log(
-    `Ingesting jobs for ${companies.length} companies` +
-      (limit ? ` (INGEST_LIMIT=${limit})` : ""),
-  );
+// Assumes one worker process with at most one active job per board (groupConcurrency: 1),
+// so requests to each board start at least REQUEST_INTERVAL_MS apart.
+const lastRequestAt = new Map<JobBoard, number>();
 
-  const summary: IngestSummary = {
-    companiesFetched: 0,
-    companiesFailed: {},
+async function waitForBoardSlot(board: JobBoard): Promise<void> {
+  const wait = (lastRequestAt.get(board) ?? 0) + REQUEST_INTERVAL_MS - Date.now();
+  if (wait > 0) await sleep(wait);
+  lastRequestAt.set(board, Date.now());
+}
+
+export async function ingestCompany(
+  company: Company,
+): Promise<CompanyIngestResult> {
+  const result: CompanyIngestResult = {
+    fetchFailed: null,
     jobsSeen: 0,
     jobsOutsideAustralia: 0,
     duplicatesDropped: 0,
     jobsSaved: 0,
     rowsFailed: 0,
     jobsDeleted: 0,
-    companiesCleanupFailed: 0,
+    cleanupFailed: false,
   };
+  const label = `${company.job_board}/${company.company_board_id}`;
+
+  await waitForBoardSlot(company.job_board);
+  const fetched = await fetchJobs(company.job_board, company.company_board_id);
+  if (!fetched.ok) {
+    result.fetchFailed = fetched.reason;
+    console.warn(`${label}: fetch failed: ${fetched.reason}`);
+    return result;
+  }
+
   const seenKeys = new Set<string>();
-  let processed = 0;
-
-  const onCompanyDone = () => {
-    processed++;
-    if (processed % PROGRESS_EVERY === 0) {
-      console.log(
-        `Processed ${processed}/${companies.length} companies, ${summary.jobsSeen} jobs seen, ${summary.jobsSaved} saved, ${summary.jobsDeleted} deleted`,
-      );
-    }
-  };
-
-  const boards = new Map<JobBoard, Company[]>();
-  for (const company of companies) {
-    const queue = boards.get(company.job_board) ?? [];
-    queue.push(company);
-    boards.set(company.job_board, queue);
-  }
-
-  await Promise.all(
-    [...boards.values()].map(async (boardCompanies) => {
-      let lastRequestAt = 0;
-      for (const company of boardCompanies) {
-        const wait = lastRequestAt + REQUEST_INTERVAL_MS - Date.now();
-        if (wait > 0) await sleep(wait);
-        lastRequestAt = Date.now();
-
-        try {
-          await ingestCompany(company, summary, seenKeys);
-        } catch (err) {
-          recordCompanyFailure(
-            summary,
-            `unexpected error: ${errorMessage(err)}`,
-          );
-          console.error(
-            `${company.job_board}/${company.company_board_id}:`,
-            err,
-          );
-        }
-        onCompanyDone();
-      }
-    }),
-  );
-
-  logSummary(summary, companies.length);
-  return summary;
-}
-
-async function ingestCompany(
-  company: Company,
-  summary: IngestSummary,
-  seenKeys: Set<string>,
-): Promise<void> {
-  const result = await fetchJobs(company.job_board, company.company_board_id);
-  if (!result.ok) {
-    recordCompanyFailure(summary, result.reason);
-    return;
-  }
-  summary.companiesFetched++;
-
   const rows: JobRow[] = [];
-  for (const job of result.jobs) {
-    summary.jobsSeen++;
+  for (const job of fetched.jobs) {
+    result.jobsSeen++;
     if (job.country === null) {
-      summary.jobsOutsideAustralia++;
+      result.jobsOutsideAustralia++;
       continue;
     }
     const row = toJobRow(company.id, job);
     if (seenKeys.has(row.duplicate_key)) {
-      summary.duplicatesDropped++;
+      result.duplicatesDropped++;
       continue;
     }
     seenKeys.add(row.duplicate_key);
@@ -142,16 +95,24 @@ async function ingestCompany(
   }
 
   for (let start = 0; start < rows.length; start += SAVE_BATCH_SIZE) {
-    await saveBatch(rows.slice(start, start + SAVE_BATCH_SIZE), summary);
+    await saveBatch(rows.slice(start, start + SAVE_BATCH_SIZE), result);
   }
 
   // Only Australian jobs count as live, so rows saved before the Australia-only filter get deleted.
   const liveIds = new Set(
-    result.jobs
+    fetched.jobs
       .filter((job) => job.country !== null)
       .map((job) => job.boardJobId),
   );
-  await deleteClosedJobs(company, liveIds, summary);
+  await deleteClosedJobs(company, liveIds, result);
+
+  console.log(
+    `${label}: ${result.jobsSeen} seen, ${result.jobsOutsideAustralia} outside Australia, ` +
+      `${result.duplicatesDropped} duplicates, ${result.jobsSaved} saved, ` +
+      `${result.rowsFailed} rows failed, ${result.jobsDeleted} deleted` +
+      (result.cleanupFailed ? ", cleanup failed" : ""),
+  );
+  return result;
 }
 
 function toJobRow(companyId: string, job: AtsJob): JobRow {
@@ -181,11 +142,11 @@ function duplicateKey(
 
 async function saveBatch(
   batch: JobRow[],
-  summary: IngestSummary,
+  result: CompanyIngestResult,
 ): Promise<void> {
   const batchError = await upsertJobs(batch);
   if (!batchError) {
-    summary.jobsSaved += batch.length;
+    result.jobsSaved += batch.length;
     return;
   }
 
@@ -195,10 +156,10 @@ async function saveBatch(
   for (const row of batch) {
     const rowError = await upsertJobs([row]);
     if (!rowError) {
-      summary.jobsSaved++;
+      result.jobsSaved++;
       continue;
     }
-    summary.rowsFailed++;
+    result.rowsFailed++;
     console.error(
       `Job ${row.board_job_id} for company ${row.company_id} ("${row.title}") failed: ${rowError}`,
     );
@@ -221,7 +182,7 @@ async function upsertJobs(rows: JobRow[]): Promise<string | null> {
 async function deleteClosedJobs(
   company: Company,
   liveIds: Set<string>,
-  summary: IngestSummary,
+  result: CompanyIngestResult,
 ): Promise<void> {
   try {
     if (liveIds.size === 0) {
@@ -230,7 +191,7 @@ async function deleteClosedJobs(
         .delete({ count: "exact" })
         .eq("company_id", company.id);
       if (error) throw new Error(error.message);
-      summary.jobsDeleted += count ?? 0;
+      result.jobsDeleted += count ?? 0;
       return;
     }
 
@@ -243,10 +204,10 @@ async function deleteClosedJobs(
         .eq("company_id", company.id)
         .in("board_job_id", closedIds.slice(start, start + DELETE_BATCH_SIZE));
       if (error) throw new Error(error.message);
-      summary.jobsDeleted += count ?? 0;
+      result.jobsDeleted += count ?? 0;
     }
   } catch (err) {
-    summary.companiesCleanupFailed++;
+    result.cleanupFailed = true;
     console.error(
       `${company.job_board}/${company.company_board_id}: deleting closed jobs failed: ${errorMessage(err)}`,
     );
@@ -270,7 +231,8 @@ async function loadBoardJobIds(companyId: string): Promise<string[]> {
   return ids;
 }
 
-async function loadCompanies(limit: number | null): Promise<Company[]> {
+export async function loadCompanies(): Promise<Company[]> {
+  const limit = readIngestLimit();
   const companies: Company[] = [];
   for (let from = 0; ; from += PAGE_SIZE) {
     const pageSize = limit
@@ -301,34 +263,6 @@ function readIngestLimit(): number | null {
     );
   }
   return limit;
-}
-
-function recordCompanyFailure(summary: IngestSummary, reason: string): void {
-  summary.companiesFailed[reason] = (summary.companiesFailed[reason] ?? 0) + 1;
-}
-
-function logSummary(summary: IngestSummary, total: number): void {
-  const failedTotal = Object.values(summary.companiesFailed).reduce(
-    (sum, n) => sum + n,
-    0,
-  );
-  console.log(
-    [
-      `Job ingestion done for ${total} companies:`,
-      `  companies fetched: ${summary.companiesFetched}`,
-      `  companies failed:  ${failedTotal}`,
-      ...Object.entries(summary.companiesFailed)
-        .sort(([, a], [, b]) => b - a)
-        .map(([reason, count]) => `    ${count} x ${reason}`),
-      `  jobs seen:         ${summary.jobsSeen}`,
-      `  outside Australia: ${summary.jobsOutsideAustralia}`,
-      `  duplicates dropped: ${summary.duplicatesDropped}`,
-      `  jobs saved:        ${summary.jobsSaved}`,
-      `  rows failed:       ${summary.rowsFailed}`,
-      `  jobs deleted:      ${summary.jobsDeleted}`,
-      `  cleanup failed:    ${summary.companiesCleanupFailed} companies`,
-    ].join("\n"),
-  );
 }
 
 function errorMessage(err: unknown): string {

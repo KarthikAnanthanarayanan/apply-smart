@@ -1,39 +1,41 @@
-import path from "node:path";
-import dotenv from "dotenv";
-import { PgBoss } from "pg-boss";
-import { ingestJobs } from "./ingestJobs.js";
+import { ingestCompany, loadCompanies, type Company } from "./ingestJobs.js";
+import {
+  INGEST_COMPANY,
+  INGEST_JOBS,
+  INGEST_SINGLETON_KEY,
+  startBoss,
+} from "./queues.js";
 
-dotenv.config({ path: path.resolve(import.meta.dirname, "../../.env") });
+const NIGHTLY_2AM = "0 2 * * *"; // CRON time for 2am every night.
+const BOARD_COUNT = 3; // 3 job boards (ashby, lever, greenhouse).
+const INSERT_BATCH_SIZE = 500; // insert 500 companies at a time (small & safe).
 
-const { DATABASE_URL } = process.env;
-if (!DATABASE_URL) {
-  throw new Error(
-    "Missing required environment variable: DATABASE_URL. " +
-      "Set it in backend/.env (see backend/.env.example).",
-  );
-}
-
-const INGEST_JOBS = "ingest-jobs";
-// Shared by the nightly and startup jobs so the exclusive queue never holds or runs two ingests at once.
-const INGEST_SINGLETON_KEY = "ingest-jobs";
-const NIGHTLY_2AM = "0 2 * * *";
-
-const boss = new PgBoss(DATABASE_URL);
-boss.on("error", (err) => console.error("pg-boss error:", err));
-
-await boss.start();
-
-await boss.createQueue(INGEST_JOBS, {
-  policy: "exclusive",
-  // A full run is ~3,600 companies at 1 request/second per board, well over the 15 minute default.
-  expireInSeconds: 6 * 60 * 60,
-  retryLimit: 1,
-  retryDelay: 15 * 60,
-});
+const boss = await startBoss();
 
 await boss.work(INGEST_JOBS, async () => {
-  await ingestJobs();
+  const companies = await loadCompanies();
+  let queued = 0;
+  for (let start = 0; start < companies.length; start += INSERT_BATCH_SIZE) {
+    const ids = await boss.insert(
+      INGEST_COMPANY,
+      companies.slice(start, start + INSERT_BATCH_SIZE).map((company) => ({
+        data: company,
+        singletonKey: `company:${company.id}`,
+        group: { id: company.job_board },
+      })),
+    );
+    queued += ids?.length ?? 0;
+  }
+  console.log(`Queued ${queued}/${companies.length} company ingests`);
 });
+
+// groupConcurrency 1 per job board keeps each board to one request at a time across all workers,
+// while the three boards run in parallel.
+await boss.work<Company>(
+  INGEST_COMPANY,
+  { localConcurrency: BOARD_COUNT, groupConcurrency: 1 },
+  async ([job]) => ingestCompany(job!.data),
+);
 
 await boss.schedule(
   INGEST_JOBS,
@@ -42,17 +44,9 @@ await boss.schedule(
   { tz: "Australia/Sydney", singletonKey: INGEST_SINGLETON_KEY },
 );
 
-const backfillId = await boss.send(
-  INGEST_JOBS,
-  {},
-  { singletonKey: INGEST_SINGLETON_KEY },
-);
 console.log(
-  backfillId
-    ? `Queued startup ingest (job ${backfillId})`
-    : "An ingest is already queued or running, skipped the startup ingest",
+  `Worker started, "${INGEST_JOBS}" scheduled at 2am Australia/Sydney`,
 );
-console.log(`Worker started, "${INGEST_JOBS}" scheduled at 2am Australia/Sydney`);
 
 let stopping = false;
 async function shutdown(signal: NodeJS.Signals): Promise<void> {

@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "seed:companies": "tsx scripts/seed-companies.ts",
+    "backfill:jobs": "tsx scripts/backfill-jobs.ts",
     "worker": "tsx src/worker/index.ts",
     "typecheck": "tsc --noEmit"
   },
