@@ -4,7 +4,8 @@ export interface AtsJob {
   boardJobId: string;
   title: string;
   city: string | null;
-  country: string | null;
+  state: string | null;
+  country: string | null; // "Australia", or null when the job is outside Australia
   applyUrl: string | null;
   raw: Record<string, unknown>;
   updatedAt: string | null;

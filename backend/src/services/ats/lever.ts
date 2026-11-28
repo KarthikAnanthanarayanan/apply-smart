@@ -7,12 +7,7 @@ import {
   type AtsJob,
   type FetchJobsResult,
 } from "./http.js";
-import {
-  countryName,
-  mergeLocations,
-  parseLocation,
-  REMOTE_CITY,
-} from "./normalise.js";
+import { parseLocation, REMOTE_CITY } from "./normalise.js";
 
 export async function fetchJobs(
   companyBoardId: string,
@@ -33,17 +28,26 @@ export async function fetchJobs(
       const allLocations = Array.isArray(categories?.allLocations)
         ? categories.allLocations
         : [];
-      const { city, country } = mergeLocations(
-        { city: null, country: countryName(job.country) },
-        parseLocation(stringOrNull(categories?.location)),
-        parseLocation(stringOrNull(allLocations[0])),
+      // job.country is a structured ISO code; the location text adds the city and state.
+      // null = not in Australia.
+      const place = parseLocation(
+        [
+          stringOrNull(categories?.location) ?? stringOrNull(allLocations[0]),
+          stringOrNull(job.country),
+        ]
+          .filter(Boolean)
+          .join(", "),
       );
 
       return {
         boardJobId: job.id as string,
         title: stringOrNull(job.text)!,
-        city: job.workplaceType === "remote" ? REMOTE_CITY : city,
-        country,
+        city:
+          place && job.workplaceType === "remote"
+            ? REMOTE_CITY
+            : (place?.city ?? null),
+        state: place?.state ?? null,
+        country: place?.country ?? null,
         applyUrl: stringOrNull(job.hostedUrl),
         raw: job,
         updatedAt:

@@ -7,12 +7,7 @@ import {
   type AtsJob,
   type FetchJobsResult,
 } from "./http.js";
-import {
-  countryName,
-  mergeLocations,
-  parseLocation,
-  REMOTE_CITY,
-} from "./normalise.js";
+import { parseLocation, REMOTE_CITY } from "./normalise.js";
 
 export async function fetchJobs(
   companyBoardId: string,
@@ -39,20 +34,28 @@ export async function fetchJobs(
         isRecord(job.address) && isRecord(job.address.postalAddress)
           ? job.address.postalAddress
           : null;
-      const { city, country } = mergeLocations(
-        {
-          city: stringOrNull(address?.addressLocality)?.trim() ?? null,
-          country: countryName(address?.addressCountry),
-        },
-        parseLocation(stringOrNull(job.location)),
-      );
+      // Structured address first, then the free-text location. null = not in Australia.
+      const place =
+        parseLocation(
+          [
+            stringOrNull(address?.addressLocality),
+            stringOrNull(address?.addressRegion),
+            stringOrNull(address?.addressCountry),
+          ]
+            .filter(Boolean)
+            .join(", "),
+        ) ?? parseLocation(stringOrNull(job.location));
 
       return {
         boardJobId: job.id as string,
         title: stringOrNull(job.title)!,
         // isRemote is also true for hybrid jobs, so use workplaceType.
-        city: job.workplaceType === "Remote" ? REMOTE_CITY : city,
-        country,
+        city:
+          place && job.workplaceType === "Remote"
+            ? REMOTE_CITY
+            : (place?.city ?? null),
+        state: place?.state ?? null,
+        country: place?.country ?? null,
         applyUrl: stringOrNull(job.jobUrl),
         raw: job,
         updatedAt:

@@ -7,7 +7,7 @@ import {
   type AtsJob,
   type FetchJobsResult,
 } from "./http.js";
-import { mergeLocations, parseLocation } from "./normalise.js";
+import { parseLocation } from "./normalise.js";
 
 export async function fetchJobs(
   companyBoardId: string,
@@ -32,19 +32,18 @@ export async function fetchJobs(
         Array.isArray(job.offices) && isRecord(job.offices[0])
           ? job.offices[0]
           : null;
-      const { city, country } = mergeLocations(
+      // The job's own location first, then its office. null = not in Australia.
+      const place =
         parseLocation(
           isRecord(job.location) ? stringOrNull(job.location.name) : null,
-        ),
-        parseLocation(stringOrNull(firstOffice?.location)),
-        parseLocation(stringOrNull(firstOffice?.name)),
-      );
+        ) ?? parseLocation(stringOrNull(firstOffice?.location));
 
       return {
         boardJobId: String(job.id),
         title: stringOrNull(job.title)!,
-        city,
-        country,
+        city: place?.city ?? null,
+        state: place?.state ?? null,
+        country: place?.country ?? null,
         applyUrl: stringOrNull(job.absolute_url),
         raw: job,
         updatedAt:

@@ -27,6 +27,7 @@ interface JobRow {
   duplicate_key: string;
   title: string;
   city: string | null;
+  state: string | null;
   country: string | null;
   apply_url: string | null;
   raw_data: Record<string, unknown>;
@@ -37,6 +38,7 @@ interface IngestSummary {
   companiesFetched: number;
   companiesFailed: Record<string, number>;
   jobsSeen: number;
+  jobsOutsideAustralia: number;
   duplicatesDropped: number;
   jobsSaved: number;
   rowsFailed: number;
@@ -56,6 +58,7 @@ export async function ingestJobs(): Promise<IngestSummary> {
     companiesFetched: 0,
     companiesFailed: {},
     jobsSeen: 0,
+    jobsOutsideAustralia: 0,
     duplicatesDropped: 0,
     jobsSaved: 0,
     rowsFailed: 0,
@@ -125,6 +128,10 @@ async function ingestCompany(
   const rows: JobRow[] = [];
   for (const job of result.jobs) {
     summary.jobsSeen++;
+    if (job.country === null) {
+      summary.jobsOutsideAustralia++;
+      continue;
+    }
     const row = toJobRow(company.id, job);
     if (seenKeys.has(row.duplicate_key)) {
       summary.duplicatesDropped++;
@@ -138,7 +145,12 @@ async function ingestCompany(
     await saveBatch(rows.slice(start, start + SAVE_BATCH_SIZE), summary);
   }
 
-  const liveIds = new Set(result.jobs.map((job) => job.boardJobId));
+  // Only Australian jobs count as live, so rows saved before the Australia-only filter get deleted.
+  const liveIds = new Set(
+    result.jobs
+      .filter((job) => job.country !== null)
+      .map((job) => job.boardJobId),
+  );
   await deleteClosedJobs(company, liveIds, summary);
 }
 
@@ -149,6 +161,7 @@ function toJobRow(companyId: string, job: AtsJob): JobRow {
     duplicate_key: duplicateKey(job.title, companyId, job.city),
     title: job.title,
     city: job.city,
+    state: job.state,
     country: job.country,
     apply_url: job.applyUrl,
     raw_data: job.raw,
@@ -308,6 +321,7 @@ function logSummary(summary: IngestSummary, total: number): void {
         .sort(([, a], [, b]) => b - a)
         .map(([reason, count]) => `    ${count} x ${reason}`),
       `  jobs seen:         ${summary.jobsSeen}`,
+      `  outside Australia: ${summary.jobsOutsideAustralia}`,
       `  duplicates dropped: ${summary.duplicatesDropped}`,
       `  jobs saved:        ${summary.jobsSaved}`,
       `  rows failed:       ${summary.rowsFailed}`,
