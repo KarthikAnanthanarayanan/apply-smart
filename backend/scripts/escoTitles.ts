@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { supabase } from "../src/queries/client.js";
 
@@ -8,6 +11,12 @@ const PAGE_SIZE = 50;
 const REQUEST_DELAY_MS = 500;
 const REQUEST_TIMEOUT_MS = 60_000;
 const INSERT_BATCH_SIZE = 500;
+// Fetching takes ~15 minutes, so the result is cached here and a re-run only redoes the database writes.
+// Delete the file to refetch from ESCO.
+const CACHE_PATH = path.resolve(
+  import.meta.dirname,
+  "../data/esco/occupations.json",
+);
 
 interface Synonym {
   title: string;
@@ -227,8 +236,31 @@ async function insertSynonyms(synonyms: Synonym[], standardTitleIds: Map<string,
   return { written, failedRows };
 }
 
+interface FetchedOccupations {
+  occupations: Occupation[];
+  labelOnly: string[];
+}
+
+async function loadOrFetchOccupations(): Promise<FetchedOccupations> {
+  if (existsSync(CACHE_PATH)) {
+    const cached = JSON.parse(
+      await readFile(CACHE_PATH, "utf8"),
+    ) as FetchedOccupations;
+    console.log(
+      `Read ${cached.occupations.length} occupations from ${CACHE_PATH} (delete it to refetch)`,
+    );
+    return cached;
+  }
+
+  const fetched = await fetchOccupations();
+  await mkdir(path.dirname(CACHE_PATH), { recursive: true });
+  await writeFile(CACHE_PATH, JSON.stringify(fetched, null, 2));
+  console.log(`Saved ${fetched.occupations.length} occupations to ${CACHE_PATH}`);
+  return fetched;
+}
+
 async function main(): Promise<void> {
-  const { occupations, labelOnly } = await fetchOccupations();
+  const { occupations, labelOnly } = await loadOrFetchOccupations();
   const { synonyms, duplicatesSkipped } = buildSynonyms(occupations);
 
   const standardTitleIds = await saveStandardTitles([
