@@ -7,10 +7,11 @@ import {
   type JobBoard,
 } from "../services/ats/index.js";
 
-const PAGE_SIZE = 1_000;
-const REQUEST_INTERVAL_MS = 1_000;
-const SAVE_BATCH_SIZE = 50;
-const DELETE_BATCH_SIZE = 100;
+const PAGE_SIZE = 1_000; // how many companies are read from db at once.
+const REQUEST_INTERVAL_MS = 1_000; // 1s gap b/w requests so we don't get rate-limited.
+const SAVE_BATCH_SIZE = 50; // how many jobs are saved at one time in the table.
+const DELETE_BATCH_SIZE = 100; // how many stale jobs are deleted at one time.
+const MAX_JOB_AGE_DAYS = 20; // jobs not updated on the board within this many days are deleted.
 
 export interface Company {
   id: string;
@@ -19,7 +20,8 @@ export interface Company {
   company_board_id: string;
 }
 
-// standard_title is left out so it is null on insert and an upsert never clears a later ESCO mapping.
+// standard_title is left out so it is null on insert and an upsert never clears a later ESCO mapping
+// (since its not in field, db never overwrites it).
 interface JobRow {
   company_id: string;
   board_job_id: string;
@@ -33,86 +35,52 @@ interface JobRow {
   last_updated: string;
 }
 
-export interface CompanyIngestResult {
-  fetchFailed: string | null;
-  jobsSeen: number;
-  jobsOutsideAustralia: number;
-  duplicatesDropped: number;
-  jobsSaved: number;
-  rowsFailed: number;
-  jobsDeleted: number;
-  cleanupFailed: boolean;
-}
-
 // Each board's queue runs one company at a time in one worker process,
 // so requests to each board start at least REQUEST_INTERVAL_MS apart.
 const lastRequestAt = new Map<JobBoard, number>();
 
+// Wait 1ms per job-board request to avoid being rate-limited.
 async function waitForBoardSlot(board: JobBoard): Promise<void> {
-  const wait = (lastRequestAt.get(board) ?? 0) + REQUEST_INTERVAL_MS - Date.now();
+  const wait =
+    (lastRequestAt.get(board) ?? 0) + REQUEST_INTERVAL_MS - Date.now();
   if (wait > 0) await sleep(wait);
   lastRequestAt.set(board, Date.now());
 }
 
-export async function ingestCompany(
-  company: Company,
-): Promise<CompanyIngestResult> {
-  const result: CompanyIngestResult = {
-    fetchFailed: null,
-    jobsSeen: 0,
-    jobsOutsideAustralia: 0,
-    duplicatesDropped: 0,
-    jobsSaved: 0,
-    rowsFailed: 0,
-    jobsDeleted: 0,
-    cleanupFailed: false,
-  };
+export async function ingestCompany(company: Company): Promise<void> {
   const label = `${company.job_board}/${company.company_board_id}`;
 
   await waitForBoardSlot(company.job_board);
   const fetched = await fetchJobs(company.job_board, company.company_board_id);
   if (!fetched.ok) {
-    result.fetchFailed = fetched.reason;
     console.warn(`${label}: fetch failed: ${fetched.reason}`);
-    return result;
+    return;
   }
+
+  // Only Australian jobs updated in the last MAX_JOB_AGE_DAYS are kept, since location is null when its not Australian.
+  // Anything else is left out of liveIds, so deleteClosedJobs also removes it from the table.
+  const cutoff = Date.now() - MAX_JOB_AGE_DAYS * 24 * 60 * 60 * 1000;
+  const keptJobs = fetched.jobs.filter(
+    (job) =>
+      job.country !== null &&
+      (job.updatedAt === null || Date.parse(job.updatedAt) >= cutoff),
+  );
 
   const seenKeys = new Set<string>();
   const rows: JobRow[] = [];
-  for (const job of fetched.jobs) {
-    result.jobsSeen++;
-    if (job.country === null) {
-      result.jobsOutsideAustralia++;
-      continue;
-    }
+  for (const job of keptJobs) {
     const row = toJobRow(company.id, job);
-    if (seenKeys.has(row.duplicate_key)) {
-      result.duplicatesDropped++;
-      continue;
-    }
+    if (seenKeys.has(row.duplicate_key)) continue;
     seenKeys.add(row.duplicate_key);
     rows.push(row);
   }
 
   for (let start = 0; start < rows.length; start += SAVE_BATCH_SIZE) {
-    await saveBatch(rows.slice(start, start + SAVE_BATCH_SIZE), result);
+    await saveBatch(rows.slice(start, start + SAVE_BATCH_SIZE));
   }
 
-  // Only Australian jobs count as live, so rows saved before the Australia-only filter get deleted.
-  const liveIds = new Set(
-    fetched.jobs
-      .filter((job) => job.country !== null)
-      .map((job) => job.boardJobId),
-  );
-  await deleteClosedJobs(company, liveIds, result);
-
-  console.log(
-    `${label}: ${result.jobsSeen} seen, ${result.jobsOutsideAustralia} outside Australia, ` +
-      `${result.duplicatesDropped} duplicates, ${result.jobsSaved} saved, ` +
-      `${result.rowsFailed} rows failed, ${result.jobsDeleted} deleted` +
-      (result.cleanupFailed ? ", cleanup failed" : ""),
-  );
-  return result;
+  const liveIds = new Set(keptJobs.map((job) => job.boardJobId));
+  await deleteClosedJobs(company, liveIds);
 }
 
 function toJobRow(companyId: string, job: AtsJob): JobRow {
@@ -130,6 +98,7 @@ function toJobRow(companyId: string, job: AtsJob): JobRow {
   };
 }
 
+// to dedup per job per board.
 function duplicateKey(
   title: string,
   companyId: string,
@@ -140,26 +109,16 @@ function duplicateKey(
     .digest("hex");
 }
 
-async function saveBatch(
-  batch: JobRow[],
-  result: CompanyIngestResult,
-): Promise<void> {
+async function saveBatch(batch: JobRow[]): Promise<void> {
   const batchError = await upsertJobs(batch);
-  if (!batchError) {
-    result.jobsSaved += batch.length;
-    return;
-  }
+  if (!batchError) return;
 
   console.warn(
     `Saving a batch of ${batch.length} jobs failed (${batchError}), retrying one row at a time`,
   );
   for (const row of batch) {
     const rowError = await upsertJobs([row]);
-    if (!rowError) {
-      result.jobsSaved++;
-      continue;
-    }
-    result.rowsFailed++;
+    if (!rowError) continue;
     console.error(
       `Job ${row.board_job_id} for company ${row.company_id} ("${row.title}") failed: ${rowError}`,
     );
@@ -171,43 +130,40 @@ async function upsertJobs(rows: JobRow[]): Promise<string | null> {
   try {
     const { error } = await supabase
       .from("jobs")
-      .upsert(rows, { onConflict: "duplicate_key" });
+      .upsert(rows, { onConflict: "duplicate_key" }); // When a job is reposted etc. just update it instead of adding a new entry/erroring.
     return error ? error.message : null;
   } catch (err) {
     return errorMessage(err);
   }
 }
 
-// Deletes the company's stored jobs whose board_job_id the board no longer lists. Never throws.
+// Deletes the company's stored jobs whose board_job_id the board no longer lists OR older than 20 days.
 async function deleteClosedJobs(
   company: Company,
   liveIds: Set<string>,
-  result: CompanyIngestResult,
 ): Promise<void> {
   try {
     if (liveIds.size === 0) {
-      const { error, count } = await supabase
+      const { error } = await supabase
         .from("jobs")
-        .delete({ count: "exact" })
+        .delete()
         .eq("company_id", company.id);
       if (error) throw new Error(error.message);
-      result.jobsDeleted += count ?? 0;
       return;
     }
 
     const storedIds = await loadBoardJobIds(company.id);
     const closedIds = storedIds.filter((id) => !liveIds.has(id));
     for (let start = 0; start < closedIds.length; start += DELETE_BATCH_SIZE) {
-      const { error, count } = await supabase
+      const { error } = await supabase
         .from("jobs")
-        .delete({ count: "exact" })
+        .delete()
         .eq("company_id", company.id)
         .in("board_job_id", closedIds.slice(start, start + DELETE_BATCH_SIZE));
       if (error) throw new Error(error.message);
-      result.jobsDeleted += count ?? 0;
     }
   } catch (err) {
-    result.cleanupFailed = true;
+    // throws so boss marks job as failed and retries again.
     console.error(
       `${company.job_board}/${company.company_board_id}: deleting closed jobs failed: ${errorMessage(err)}`,
     );
@@ -253,6 +209,7 @@ export async function loadCompanies(): Promise<Company[]> {
   return companies;
 }
 
+// reads number of jobs that can come in from one request (env variable)
 function readIngestLimit(): number | null {
   const raw = process.env.INGEST_LIMIT?.trim();
   if (!raw) return null;

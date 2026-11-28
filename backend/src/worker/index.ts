@@ -58,7 +58,14 @@ await boss.work(DISPATCH_JOB_SYNCS, async () => {
 
 // Sets up one worker per queue to drain each (we can test incrementing workers per queue later on to improve concurrency -> latency).
 for (const queue of Object.values(SYNC_JOBS_QUEUES)) {
-  await boss.work<Company>(queue, async ([job]) => ingestCompany(job!.data));
+  await boss.work<Company>(queue, async ([job]) => {
+    try {
+      await ingestCompany(job!.data);
+    } catch (err) {
+      console.error(err); // pg-boss only stores the error on the job, so log it too.
+      throw err;
+    }
+  });
 }
 console.log(
   `Worker started, "${DISPATCH_JOB_SYNCS}" scheduled at 2am Australia/Sydney`,
