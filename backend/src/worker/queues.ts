@@ -10,6 +10,10 @@ export const DISPATCH_JOB_SYNCS = "dispatch-job-syncs";
 // Shared by the nightly and backfill messages so two dispatches never run at once, for deduping runs using a base key.
 export const DISPATCH_SINGLETON_KEY = "dispatch-job-syncs";
 
+// Links every unlinked job to its standard titles in one pass, so Gemini sees each distinct title once per run.
+export const TAG_JOB_TITLES = "tag-job-titles";
+export const TAG_SINGLETON_KEY = "tag-job-titles";
+
 // Board-specific Queues: 3 in total for each job board which actuall fetches and saves jobs.
 export const SYNC_JOBS_QUEUES: Record<JobBoard, string> = {
   greenhouse: "sync-greenhouse-jobs",
@@ -34,6 +38,12 @@ export async function startBoss(): Promise<PgBoss> {
   // Initial queue is created to dispatch 2am message (only created on every startup / deployment).
   await boss.createQueue(DISPATCH_JOB_SYNCS, {
     policy: "exclusive",
+    retryLimit: 1,
+    retryDelay: 15 * 60,
+  });
+
+  await boss.createQueue(TAG_JOB_TITLES, {
+    policy: "stately", // at most one run active and one waiting.
     retryLimit: 1,
     retryDelay: 15 * 60,
   });

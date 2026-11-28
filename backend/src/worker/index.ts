@@ -1,6 +1,9 @@
 import { ingestCompany, loadCompanies, type Company } from "./ingestJobs.js";
+import { standardiseTitles } from "./standardiseTitles.js";
 import {
   SYNC_JOBS_QUEUES,
+  TAG_JOB_TITLES,
+  TAG_SINGLETON_KEY,
   DISPATCH_JOB_SYNCS,
   DISPATCH_SINGLETON_KEY,
   startBoss,
@@ -8,6 +11,8 @@ import {
 import type { JobBoard } from "../services/ats/index.js";
 
 const NIGHTLY_2AM = "0 2 * * *"; // CRON time for 2am every night.
+// Tagging runs after the 2am sync has had time to finish, including its 15 minute retries.
+const NIGHTLY_4AM = "0 4 * * *";
 const INSERT_BATCH_SIZE = 500; // insert 500 companies at a time (small & safe).
 
 const boss = await startBoss();
@@ -18,6 +23,13 @@ await boss.schedule(
   NIGHTLY_2AM,
   {},
   { tz: "Australia/Sydney", singletonKey: DISPATCH_SINGLETON_KEY },
+);
+
+await boss.schedule(
+  TAG_JOB_TITLES,
+  NIGHTLY_4AM,
+  {},
+  { tz: "Australia/Sydney", singletonKey: TAG_SINGLETON_KEY },
 );
 
 // Reads the triggered message above and gets companies and puts them in job-specific queues.
@@ -68,8 +80,18 @@ for (const queue of Object.values(SYNC_JOBS_QUEUES)) {
     }
   });
 }
+await boss.work(TAG_JOB_TITLES, async () => {
+  try {
+    const errors = await standardiseTitles();
+    if (errors.length > 0) throw new Error(errors.join("\n"));
+  } catch (err) {
+    console.error(err);
+    throw err;
+  }
+});
+
 console.log(
-  `Worker started, "${DISPATCH_JOB_SYNCS}" scheduled at 2am Australia/Sydney`,
+  `Worker started, "${DISPATCH_JOB_SYNCS}" scheduled at 2am and "${TAG_JOB_TITLES}" at 4am Australia/Sydney`,
 );
 
 // Graceful shutdown to stop the workers, db conns, timers.

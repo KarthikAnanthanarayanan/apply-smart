@@ -20,8 +20,6 @@ export interface Company {
   company_board_id: string;
 }
 
-// standard_title is left out so it is null on insert and an upsert never clears a later ESCO mapping
-// (since its not in field, db never overwrites it).
 interface JobRow {
   company_id: string;
   board_job_id: string;

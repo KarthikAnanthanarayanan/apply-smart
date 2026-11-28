@@ -6,10 +6,12 @@
     "seed:companies": "tsx scripts/seed-companies.ts",
     "backfill:jobs": "tsx scripts/backfill-jobs.ts",
     "esco:titles": "tsx scripts/escoTitles.ts",
+    "tag:titles": "tsx scripts/tag-titles.ts",
     "worker": "tsx src/worker/index.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@google/genai": "^3.6.1",
     "@supabase/supabase-js": "^2.119.2",
     "all-the-cities": "^3.1.0",
     "dotenv": "^18.0.10",
